@@ -40,3 +40,7 @@ clean:
 
 status:
 	@docker compose ps
+refresh:
+	@make down
+	@make build-dev
+	@make up-dev

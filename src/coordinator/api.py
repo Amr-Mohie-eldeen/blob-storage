@@ -22,9 +22,9 @@ async def upload_file(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/blob/{blob_id}")
-async def get_blob(blob_id: str):
+@app.get("/blob/{file_name}")
+async def get_blob(file_name: str):
     try:
-        return await coordinator.get_blob(blob_id)
+        return await coordinator.get_blob(file_name)
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))

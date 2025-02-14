@@ -37,6 +37,22 @@ class Coordinator:
             logger.error(f"Redis connection failed: {str(e)}")
             raise Exception(f"Failed to initialize Redis: {str(e)}")
 
+    def _store_file_name(self, file_name: str, blob_id: str):
+        """Store the file name associated with a blob ID"""
+        try:
+            self.redis.set(file_name, blob_id)
+        except Exception as e:
+            logger.error(f"Failed to store file name: {e}")
+
+    def _get_blob_id_by_file_name(self, file_name: str) -> str:
+        """Retrieve the blob ID associated with a file name"""
+        try:
+            blob_id = self.redis.get(file_name)
+            return blob_id
+        except Exception as e:
+            logger.error(f"Failed to retrieve blob ID by file name: {e}")
+            return None
+
     async def store_blob(self, file: UploadFile) -> dict:
         """
         Store a blob across storage nodes
@@ -44,8 +60,9 @@ class Coordinator:
         try:
             # Generate unique blob ID
             blob_id = str(uuid.uuid4())
-            logger.info(f"Processing upload for file: {file.filename}")
 
+            logger.info(f"Processing upload for file: {file.filename}")
+            self._store_file_name(file.filename, blob_id)
             # Get active nodes
             active_nodes = self.get_active_nodes()
             if not active_nodes:
@@ -133,12 +150,14 @@ class Coordinator:
 
     # src/coordinator/coordinator.py
 
-    async def get_blob(self, blob_id: str):
+    async def get_blob(self, file_name: str):
         """
         Retrieve a blob by its ID
         """
         try:
+            blob_id = self._get_blob_id_by_file_name(file_name)
             # Get metadata from Redis
+
             metadata = self.redis.hgetall(f"blob:{blob_id}")
             if not metadata:
                 logger.error(f"Blob not found: {blob_id}")
