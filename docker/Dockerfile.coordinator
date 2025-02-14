@@ -1,0 +1,6 @@
+# docker/Dockerfile.coordinator
+FROM distributed-blob-storage-base
+
+ENV SERVICE_TYPE=coordinator
+
+CMD ["python", "scripts/run_coordinator.py"]

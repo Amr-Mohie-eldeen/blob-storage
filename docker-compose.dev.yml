@@ -1,0 +1,21 @@
+# docker-compose.dev.yml
+version: '3.8'
+
+services:
+  coordinator:
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./config:/app/config:ro
+    environment:
+      - DEBUG=1
+    command: ["python", "-m", "uvicorn", "src.coordinator.api:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  storage_node_1:
+    volumes:
+      - ./src:/app/src:ro
+      - ./scripts:/app/scripts:ro
+      - ./config:/app/config:ro
+    environment:
+      - DEBUG=1
+    command: ["python", "-m", "uvicorn", "src.storage_node.api:app", "--host", "0.0.0.0", "--port", "8001", "--reload"]

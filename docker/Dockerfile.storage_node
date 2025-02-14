@@ -1,0 +1,9 @@
+# docker/Dockerfile.storage_node
+FROM distributed-blob-storage-base
+
+ENV SERVICE_TYPE=storage_node
+
+ARG NODE_ID
+ENV NODE_ID=$NODE_ID
+
+CMD ["python", "scripts/run_storage_node.py", "${NODE_ID}"]

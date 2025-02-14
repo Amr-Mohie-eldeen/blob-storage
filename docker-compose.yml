@@ -1,0 +1,58 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  redis:
+    image: redis:6.2-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes
+    networks:
+      - blob_network
+
+  coordinator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.coordinator
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=redis
+      - BASE_STORAGE_PATH=/data
+    volumes:
+      - coordinator_data:/data
+    depends_on:
+      - redis
+    networks:
+      - blob_network
+
+  storage_node_1:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.storage_node
+      args:
+        NODE_ID: 1
+    ports:
+      - "8001:8001"
+    environment:
+      - REDIS_HOST=redis
+      - BASE_STORAGE_PATH=/data
+      - NODE_ID=1
+    volumes:
+      - storage_node_1_data:/data
+    depends_on:
+      - redis
+      - coordinator
+    networks:
+      - blob_network
+
+networks:
+  blob_network:
+    driver: bridge
+
+volumes:
+  redis_data:
+  coordinator_data:
+  storage_node_1_data:
