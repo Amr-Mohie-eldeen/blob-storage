@@ -1,8 +1,9 @@
 # src/common/config.py
-from pydantic import BaseSettings
-from typing import Dict, Any
-import yaml
 import os
+from typing import Any, Dict
+
+import yaml
+from pydantic import BaseSettings
 
 
 class Settings(BaseSettings):

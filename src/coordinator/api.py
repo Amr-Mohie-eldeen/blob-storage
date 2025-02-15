@@ -1,8 +1,10 @@
 # src/coordinator/api.py
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
-from src.coordinator.coordinator import Coordinator
 import logging
+
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+
 from src.common.interfaces import ICoordinator
+from src.coordinator.coordinator import Coordinator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

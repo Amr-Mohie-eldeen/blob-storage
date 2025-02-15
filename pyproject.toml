@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "aiofiles>=24.1.0",
+    "black>=25.1.0",
     "fastapi==0.68.0",
     "httpx==0.23.0",
     "pydantic==1.8.2",
@@ -13,5 +14,26 @@ dependencies = [
     "python-multipart>=0.0.20",
     "pyyaml>=6.0.2",
     "redis==4.3.4",
+    "ruff>=0.9.6",
     "uvicorn==0.15.0",
 ]
+[tool.black]
+line-length = 88
+target-version = ['py39']
+exclude = '''
+/(
+    \.git
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.ruff]
+line-length = 88
+target-version = "py39"
+exclude = [".git", ".venv", "build", "dist"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+fixable = ["E", "F", "W", "I"]

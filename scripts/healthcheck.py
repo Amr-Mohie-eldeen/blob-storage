@@ -1,6 +1,7 @@
 # scripts/healthcheck.py
-import requests
 import sys
+
+import requests
 
 
 def check_service(service_type, port):

@@ -1,7 +1,9 @@
 # scripts/run_storage_node.py
-import uvicorn
 import os
 import sys
+
+import uvicorn
+
 from src.storage_node.api import app
 
 if __name__ == "__main__":

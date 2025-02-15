@@ -1,7 +1,8 @@
 # src/models/schemas.py
-from pydantic import BaseModel
 from datetime import datetime
-from typing import List, Optional
+from typing import List
+
+from pydantic import BaseModel
 
 
 class NodeInfo(BaseModel):

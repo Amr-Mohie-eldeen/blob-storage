@@ -48,3 +48,10 @@ refresh:
 
 logs:
 	@docker compose logs -f
+
+lint:
+	@ruff check .
+
+format:
+	@black .
+
