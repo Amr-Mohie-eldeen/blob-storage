@@ -13,6 +13,8 @@ from ..common.config import settings
 from ..common.utils import calculate_checksum, get_available_space
 from ..models.schemas import NodeInfo, BlobMetadata
 from ..common.exceptions import BlobNotFoundError
+import aiofiles
+import hashlib
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -61,28 +63,20 @@ class StorageNode:
             file_size = 0
             checksum = None
 
-            # Create temporary file first
-            temp_path = blob_path.with_suffix(".temp")
-            try:
-                with open(temp_path, "wb") as f:
-                    while chunk := await file.read(8192):
-                        file_size += len(chunk)
-                        f.write(chunk)
+            # Create and write directly to the final blob path
+            async with aiofiles.open(
+                blob_path, "wb"
+            ) as f:  # Use aiofiles for async I/O
+                while chunk := await file.read(8192):
+                    file_size += len(chunk)
+                    await f.write(chunk)
 
-                # Calculate checksum
-                with open(temp_path, "rb") as f:
-                    checksum = calculate_checksum(f)
+            # Calculate checksum
+            checksum = await self._calculate_checksum(blob_path)
 
-                # Rename to final filename
-                os.rename(temp_path, blob_path)
-                logger.info(
-                    f"Successfully stored blob {blob_id}, size: {file_size}, checksum: {checksum}"
-                )
-
-            finally:
-                # Clean up temp file if it exists
-                if temp_path.exists():
-                    temp_path.unlink()
+            logger.info(
+                f"Successfully stored blob {blob_id}, size: {file_size}, checksum: {checksum}"
+            )
 
             # Store blob metadata
             metadata = BlobMetadata(
@@ -120,11 +114,13 @@ class StorageNode:
                 status_code=500, detail=f"Failed to store blob: {str(e)}"
             )
 
-        except Exception as e:
-            logger.error(f"Failed to store blob {blob_id}: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=500, detail=f"Failed to store blob: {str(e)}"
-            )
+    async def _calculate_checksum(self, blob_path: Path) -> str:
+        """Calculate the checksum of the blob file"""
+        sha256_hash = hashlib.sha256()
+        async with aiofiles.open(blob_path, "rb") as f:
+            while chunk := await f.read(8192):
+                sha256_hash.update(chunk)
+        return sha256_hash.hexdigest()
 
     async def start(self):
         """Start the storage node"""
