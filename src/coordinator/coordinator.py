@@ -10,9 +10,10 @@ import httpx
 from fastapi.responses import StreamingResponse
 from src.common.interfaces import ICoordinator
 from src.common.redis_metadata_store import RedisMetadataStore
-from typing import List
+from typing import List, Dict, Tuple
 from src.models.schemas import NodeInfo
 from src.common.utils import get_available_space
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +50,7 @@ class Coordinator(ICoordinator):
             return None
 
     async def store_blob(self, file: UploadFile) -> dict:
-        """Store a blob across storage nodes"""
+        """Store a blob across all available storage nodes concurrently"""
         try:
             blob_id = str(uuid.uuid4())
             logger.info(f"Processing upload for file: {file.filename}")
@@ -57,30 +58,208 @@ class Coordinator(ICoordinator):
             # Store filename mapping
             self._store_file_name(file.filename, blob_id)
 
-            # Get and validate storage node
-            node_id = self._get_storage_node()
+            # Get all active nodes
+            active_nodes = self.get_active_nodes()
+            if not active_nodes:
+                raise HTTPException(
+                    status_code=503, detail="No storage nodes available"
+                )
 
-            # Store blob on node
-            node_response = await self._store_blob_on_node(node_id, blob_id, file)
+            # Read file content once
+            content = await file.read()
 
-            # Store and prepare metadata
-            metadata = self._prepare_metadata(blob_id, file, node_response, node_id)
-            self._store_metadata(blob_id, metadata)
-
-            # Prepare response
-            response_metadata = self._prepare_response_metadata(metadata)
-
-            logger.info(f"Successfully stored blob {blob_id}")
-            return {
-                "message": "File uploaded successfully",
-                "metadata": response_metadata,
+            # Initialize metadata with "in_progress" status
+            initial_metadata = {
+                "blob_id": blob_id,
+                "original_filename": file.filename,
+                "content_type": file.content_type,
+                "upload_status": "in_progress",
+                "successful_nodes": [],
+                "pending_nodes": active_nodes,
+                "failed_nodes": [],
+                "created_at": datetime.now().isoformat(),
+                "size": None,
+                "checksum": None,
             }
+            self._store_metadata(blob_id, initial_metadata)
 
-        except HTTPException:
-            raise
+            # Create and gather upload tasks
+            tasks = []
+            for node_id in active_nodes:
+                task = asyncio.create_task(
+                    self._store_blob_on_node(
+                        node_id, blob_id, content, file.filename, file.content_type
+                    )
+                )
+                tasks.append(task)
+
+            # Wait for first successful upload
+            first_success = None
+            for completed_task in asyncio.as_completed(tasks):
+                try:
+                    result = await completed_task
+                    if not first_success:
+                        first_success = result
+                        # Update metadata with first success
+                        metadata = self._get_blob_metadata(blob_id)
+                        if metadata:
+                            metadata["successful_nodes"] = [result["node_id"]]
+                            metadata["size"] = result["size"]
+                            metadata["checksum"] = result["checksum"]
+                            metadata["pending_nodes"] = [
+                                n for n in active_nodes if n != result["node_id"]
+                            ]
+                            self._store_metadata(blob_id, metadata)
+
+                            # Start background task for remaining uploads
+                            remaining_tasks = [t for t in tasks if not t.done()]
+                            if remaining_tasks:
+                                asyncio.create_task(
+                                    self._handle_remaining_uploads(
+                                        blob_id, remaining_tasks
+                                    )
+                                )
+
+                            # Return success response
+                            return {
+                                "message": "File upload initiated successfully",
+                                "metadata": metadata,
+                            }
+                except Exception as e:
+                    logger.error(f"Upload failed to node: {str(e)}")
+
+            # If we get here, all uploads failed
+            raise HTTPException(status_code=500, detail="Failed to upload to any nodes")
+
         except Exception as e:
             logger.error(f"Upload failed: {str(e)}", exc_info=True)
-            raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+            raise HTTPException(status_code=500, detail=str(e))
+
+    async def _handle_remaining_uploads(
+        self, blob_id: str, remaining_tasks: List[asyncio.Task]
+    ):
+        """Handle remaining uploads in the background"""
+        try:
+            metadata = self._get_blob_metadata(blob_id)
+            successful_nodes = set(metadata.get("successful_nodes", []))
+            failed_nodes = set()
+
+            # Wait for all remaining tasks to complete
+            for task in remaining_tasks:
+                try:
+                    result = await task
+                    successful_nodes.add(result["node_id"])
+                except Exception as e:
+                    logger.error(f"Background upload failed: {str(e)}")
+                    # Extract node_id from error message
+                    error_msg = str(e)
+                    if "node_id=" in error_msg:
+                        failed_node = error_msg.split("node_id=")[1].split()[0]
+                        failed_nodes.add(failed_node)
+
+            # Update final metadata
+            metadata["successful_nodes"] = list(successful_nodes)
+            metadata["failed_nodes"] = list(failed_nodes)
+            metadata["pending_nodes"] = []
+            metadata["upload_status"] = (
+                "completed" if len(failed_nodes) == 0 else "degraded"
+            )
+
+            self._store_metadata(blob_id, metadata)
+
+            # Check if we need to trigger auto-repair
+            if (
+                len(successful_nodes) < len(self.get_active_nodes()) * 0.5
+            ):  # Less than 50% success
+                asyncio.create_task(self._trigger_auto_repair(blob_id))
+
+        except Exception as e:
+            logger.error(f"Error handling remaining uploads: {str(e)}")
+
+    async def _store_blob_on_node(
+        self,
+        node_id: str,
+        blob_id: str,
+        content: bytes,
+        filename: str,
+        content_type: str,
+    ) -> dict:
+        """Store blob on a specific node"""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                files = {"file": (filename, content, content_type)}
+
+                # Add retry logic
+                max_retries = 3
+                retry_delay = 1.0
+
+                for attempt in range(max_retries):
+                    try:
+                        response = await client.post(
+                            f"http://storage_node_{node_id}:8001/blob/{blob_id}",
+                            files=files,
+                        )
+
+                        if response.status_code == 200:
+                            result = response.json()
+                            result["node_id"] = node_id
+                            return result
+
+                        logger.error(
+                            f"Storage node {node_id} failed with status {response.status_code}: {response.text}"
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"Attempt {attempt + 1} failed for node {node_id}: {str(e)}"
+                        )
+                        if attempt < max_retries - 1:
+                            await asyncio.sleep(retry_delay)
+                            retry_delay *= 2  # Exponential backoff
+                        continue
+
+                raise Exception(f"All {max_retries} attempts failed for node {node_id}")
+
+        except Exception as e:
+            logger.error(f"Failed to store blob on node {node_id}: {str(e)}")
+            raise Exception(f"Upload failed for node_id={node_id}: {str(e)}")
+
+    async def _trigger_auto_repair(self, blob_id: str):
+        """Trigger auto-repair for degraded blobs"""
+        try:
+            metadata = self._get_blob_metadata(blob_id)
+            successful_nodes = set(metadata.get("successful_nodes", []))
+            active_nodes = set(self.get_active_nodes())
+
+            # Find nodes that need the blob
+            nodes_needing_blob = active_nodes - successful_nodes
+
+            if not nodes_needing_blob:
+                return
+
+            # Get blob from a successful node
+            source_node = next(iter(successful_nodes))
+
+            # Copy to nodes that need it
+            for target_node in nodes_needing_blob:
+                try:
+                    await self._copy_blob_between_nodes(
+                        blob_id, source_node, target_node
+                    )
+                    successful_nodes.add(target_node)
+                except Exception as e:
+                    logger.error(f"Auto-repair failed for node {target_node}: {str(e)}")
+
+            # Update metadata
+            metadata["successful_nodes"] = list(successful_nodes)
+            metadata["upload_status"] = (
+                "completed"
+                if len(successful_nodes) == len(active_nodes)
+                else "degraded"
+            )
+            self._store_metadata(blob_id, metadata)
+
+        except Exception as e:
+            logger.error(f"Auto-repair failed for blob {blob_id}: {str(e)}")
 
     def _get_storage_node(self) -> str:
         """Select an appropriate storage node"""
@@ -89,39 +268,6 @@ class Coordinator(ICoordinator):
             logger.error("No active storage nodes available")
             raise HTTPException(status_code=503, detail="No storage nodes available")
         return active_nodes[0]  # For now, just return first node
-
-    async def _store_blob_on_node(
-        self, node_id: str, blob_id: str, file: UploadFile
-    ) -> dict:
-        """Store blob on the specified node"""
-        try:
-            async with httpx.AsyncClient() as client:
-                logger.info(f"Sending blob to storage node {node_id}")
-                response = await client.post(
-                    f"http://storage_node_{node_id}:8001/blob/{blob_id}",
-                    files={
-                        "file": (file.filename, await file.read(), file.content_type)
-                    },
-                )
-
-                if response.status_code != 200:
-                    logger.error(
-                        f"Storage node {node_id} returned status {response.status_code}: {response.text}"
-                    )
-                    raise HTTPException(
-                        status_code=500,
-                        detail=f"Failed to store blob on node {node_id}",
-                    )
-
-                logger.info(f"Storage node response: {response.text}")
-                return response.json()
-
-        except httpx.RequestError as e:
-            logger.error(f"Request to storage node failed: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to communicate with storage node: {str(e)}",
-            )
 
     def _prepare_metadata(
         self, blob_id: str, file: UploadFile, node_response: dict, node_id: str
@@ -140,10 +286,14 @@ class Coordinator(ICoordinator):
     def _store_metadata(self, blob_id: str, metadata: dict) -> None:
         """Store metadata in Redis"""
         try:
+            # Convert all values to strings to ensure Redis compatibility
             redis_metadata = {
-                key: str(value) if value is not None else ""
+                key: (
+                    json.dumps(value) if isinstance(value, (list, dict)) else str(value)
+                )
                 for key, value in metadata.items()
             }
+            logger.debug(f"Storing metadata for blob {blob_id}: {redis_metadata}")
             self.redis.hset(f"blob:{blob_id}", mapping=redis_metadata)
         except Exception as redis_error:
             logger.error(f"Redis error: {str(redis_error)}")
@@ -166,6 +316,8 @@ class Coordinator(ICoordinator):
 
             # Get and validate metadata
             metadata = self._get_blob_metadata(blob_id)
+            if not metadata:
+                raise HTTPException(status_code=404, detail="Blob metadata not found")
 
             # Get available node
             node_id = self._get_available_node_for_blob(metadata)
@@ -182,17 +334,34 @@ class Coordinator(ICoordinator):
             )
 
     def _get_blob_metadata(self, blob_id: str) -> dict:
-        """Get and validate blob metadata"""
-        metadata = self.redis.hgetall(f"blob:{blob_id}")
-        if not metadata:
-            logger.error(f"Blob not found: {blob_id}")
-            raise HTTPException(status_code=404, detail="Blob not found")
-        return metadata
+        """Get and parse blob metadata"""
+        try:
+            metadata = self.redis.hgetall(f"blob:{blob_id}")
+            logger.debug(f"Retrieved raw metadata for blob {blob_id}: {metadata}")
+            if not metadata:
+                return None
+
+            # Parse JSON strings back to Python objects
+            for key in metadata:
+                try:
+                    if key in ["successful_nodes", "pending_nodes", "failed_nodes"]:
+                        metadata[key] = json.loads(metadata[key])
+                except json.JSONDecodeError:
+                    logger.error(
+                        f"Failed to parse JSON for key {key} in blob {blob_id}"
+                    )
+                    pass
+
+            logger.debug(f"Parsed metadata for blob {blob_id}: {metadata}")
+            return metadata
+        except Exception as e:
+            logger.error(f"Failed to get metadata for blob {blob_id}: {str(e)}")
+            return None
 
     def _get_available_node_for_blob(self, metadata: dict) -> str:
         """Get an available node that has the blob"""
-        stored_nodes = json.loads(metadata.get("stored_nodes", "[]"))
-        if not stored_nodes:
+        successful_nodes = metadata.get("successful_nodes", [])
+        if not successful_nodes:
             logger.error("No nodes found for blob")
             raise HTTPException(
                 status_code=404, detail="No nodes available with this blob"
@@ -202,7 +371,7 @@ class Coordinator(ICoordinator):
         active_nodes = self.get_active_nodes()
 
         # Find first available node that has the blob
-        for node_id in stored_nodes:
+        for node_id in successful_nodes:
             if node_id in active_nodes:
                 return node_id
 
@@ -216,7 +385,7 @@ class Coordinator(ICoordinator):
     ):
         """Retrieve blob from specified node"""
         try:
-            async with httpx.AsyncClient() as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 response = await client.get(
                     f"http://storage_node_{node_id}:8001/blob/{blob_id}",
                     follow_redirects=True,

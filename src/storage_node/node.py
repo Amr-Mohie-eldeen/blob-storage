@@ -52,21 +52,15 @@ class StorageNode(IStorageNode):
         self.metadata_store = RedisMetadataStore(self.redis)
 
     async def store_blob(self, blob_id: str, file: UploadFile) -> dict:
-        """Store a blob file"""
+        """Store a blob file with enhanced metadata"""
         logger.info(f"Storing blob {blob_id}, filename: {file.filename}")
 
         try:
-            # Create blob path
             blob_path = Path(self.storage_dir) / blob_id
-
-            # Check available space
             file_size = 0
-            checksum = None
 
             # Create and write directly to the final blob path
-            async with aiofiles.open(
-                blob_path, "wb"
-            ) as f:  # Use aiofiles for async I/O
+            async with aiofiles.open(blob_path, "wb") as f:
                 while chunk := await file.read(8192):
                     file_size += len(chunk)
                     await f.write(chunk)
@@ -74,38 +68,27 @@ class StorageNode(IStorageNode):
             # Calculate checksum
             checksum = await calculate_checksum(str(blob_path))
 
-            logger.info(
-                f"Successfully stored blob {blob_id}, size: {file_size}, checksum: {checksum}"
-            )
-
             # Store blob metadata
-            metadata = BlobMetadata(
-                blob_id=blob_id,
-                original_filename=file.filename,
-                content_type=file.content_type,
-                size=file_size,
-                checksum=checksum,
-                created_at=datetime.now(),
-                nodes=[self.node_id],
-            )
-
-            # Convert the metadata to a dict and ensure datetime is converted to string
-            metadata_dict = {
-                k: str(v) if isinstance(v, (datetime, list)) else v
-                for k, v in metadata.dict().items()
+            metadata = {
+                "blob_id": blob_id,
+                "original_filename": file.filename,
+                "content_type": file.content_type,
+                "size": file_size,
+                "checksum": checksum,
+                "node_id": self.node_id,
+                "stored_at": datetime.now().isoformat(),
+                "status": "success",
             }
 
             # Store metadata in Redis
-            self.redis.hset(f"blob:{blob_id}", mapping=metadata_dict)
-
-            # Update node info with new space usage
-            self._update_heartbeat()
+            self.redis.hset(f"blob:{blob_id}:node:{self.node_id}", mapping=metadata)
 
             return {
                 "blob_id": blob_id,
                 "size": file_size,
                 "checksum": checksum,
                 "node_id": self.node_id,
+                "status": "success",
             }
 
         except Exception as e:
