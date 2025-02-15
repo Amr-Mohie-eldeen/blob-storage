@@ -49,86 +49,26 @@ class Coordinator(ICoordinator):
             return None
 
     async def store_blob(self, file: UploadFile) -> dict:
-        """
-        Store a blob across storage nodes
-        """
+        """Store a blob across storage nodes"""
         try:
             blob_id = str(uuid.uuid4())
-
             logger.info(f"Processing upload for file: {file.filename}")
+
+            # Store filename mapping
             self._store_file_name(file.filename, blob_id)
 
-            active_nodes = self.get_active_nodes()
-            if not active_nodes:
-                logger.error("No active storage nodes available")
-                raise HTTPException(
-                    status_code=503, detail="No storage nodes available"
-                )
-
-            # Store on first available node (for now, later implement replication)
-            node_id = active_nodes[0]
-            logger.info(f"Selected node {node_id} for blob {blob_id}")
+            # Get and validate storage node
+            node_id = self._get_storage_node()
 
             # Store blob on node
-            try:
-                async with httpx.AsyncClient() as client:
-                    logger.info(f"Sending blob to storage node {node_id}")
-                    response = await client.post(
-                        f"http://storage_node_{node_id}:8001/blob/{blob_id}",
-                        files={
-                            "file": (
-                                file.filename,
-                                await file.read(),
-                                file.content_type,
-                            )
-                        },
-                    )
+            node_response = await self._store_blob_on_node(node_id, blob_id, file)
 
-                    if response.status_code != 200:
-                        logger.error(
-                            f"Storage node {node_id} returned status {response.status_code}: {response.text}"
-                        )
-                        raise HTTPException(
-                            status_code=500,
-                            detail=f"Failed to store blob on node {node_id}",
-                        )
+            # Store and prepare metadata
+            metadata = self._prepare_metadata(blob_id, file, node_response, node_id)
+            self._store_metadata(blob_id, metadata)
 
-                    logger.info(f"Storage node response: {response.text}")
-                    node_response = response.json()
-
-            except httpx.RequestError as e:
-                logger.error(f"Request to storage node failed: {str(e)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to communicate with storage node: {str(e)}",
-                )
-
-            # Store metadata in Redis
-            metadata = {
-                "blob_id": blob_id,
-                "original_filename": file.filename,
-                "content_type": file.content_type,
-                "size": str(node_response.get("size")),  # Convert to string
-                "checksum": node_response.get("checksum"),
-                "stored_nodes": json.dumps([node_id]),  # Serialize list to JSON string
-                "created_at": datetime.now().isoformat(),
-            }
-
-            try:
-                # Ensure all values are strings for Redis
-                redis_metadata = {
-                    key: str(value) if value is not None else ""
-                    for key, value in metadata.items()
-                }
-                self.redis.hset(f"blob:{blob_id}", mapping=redis_metadata)
-            except Exception as redis_error:
-                logger.error(f"Redis error: {str(redis_error)}")
-                raise HTTPException(status_code=500, detail="Failed to store metadata")
-
-            # Return the original format for the response (deserialize stored_nodes)
-            response_metadata = metadata.copy()
-            response_metadata["stored_nodes"] = json.loads(metadata["stored_nodes"])
-            response_metadata["size"] = int(metadata["size"])  # Convert back to int
+            # Prepare response
+            response_metadata = self._prepare_response_metadata(metadata)
 
             logger.info(f"Successfully stored blob {blob_id}")
             return {
@@ -142,71 +82,168 @@ class Coordinator(ICoordinator):
             logger.error(f"Upload failed: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-    async def get_blob(self, file_name: str):
-        """
-        Retrieve a blob by its ID
-        """
+    def _get_storage_node(self) -> str:
+        """Select an appropriate storage node"""
+        active_nodes = self.get_active_nodes()
+        if not active_nodes:
+            logger.error("No active storage nodes available")
+            raise HTTPException(status_code=503, detail="No storage nodes available")
+        return active_nodes[0]  # For now, just return first node
+
+    async def _store_blob_on_node(
+        self, node_id: str, blob_id: str, file: UploadFile
+    ) -> dict:
+        """Store blob on the specified node"""
         try:
+            async with httpx.AsyncClient() as client:
+                logger.info(f"Sending blob to storage node {node_id}")
+                response = await client.post(
+                    f"http://storage_node_{node_id}:8001/blob/{blob_id}",
+                    files={
+                        "file": (file.filename, await file.read(), file.content_type)
+                    },
+                )
+
+                if response.status_code != 200:
+                    logger.error(
+                        f"Storage node {node_id} returned status {response.status_code}: {response.text}"
+                    )
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to store blob on node {node_id}",
+                    )
+
+                logger.info(f"Storage node response: {response.text}")
+                return response.json()
+
+        except httpx.RequestError as e:
+            logger.error(f"Request to storage node failed: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to communicate with storage node: {str(e)}",
+            )
+
+    def _prepare_metadata(
+        self, blob_id: str, file: UploadFile, node_response: dict, node_id: str
+    ) -> dict:
+        """Prepare metadata for storage"""
+        return {
+            "blob_id": blob_id,
+            "original_filename": file.filename,
+            "content_type": file.content_type,
+            "size": str(node_response.get("size")),
+            "checksum": node_response.get("checksum"),
+            "stored_nodes": json.dumps([node_id]),
+            "created_at": datetime.now().isoformat(),
+        }
+
+    def _store_metadata(self, blob_id: str, metadata: dict) -> None:
+        """Store metadata in Redis"""
+        try:
+            redis_metadata = {
+                key: str(value) if value is not None else ""
+                for key, value in metadata.items()
+            }
+            self.redis.hset(f"blob:{blob_id}", mapping=redis_metadata)
+        except Exception as redis_error:
+            logger.error(f"Redis error: {str(redis_error)}")
+            raise HTTPException(status_code=500, detail="Failed to store metadata")
+
+    def _prepare_response_metadata(self, metadata: dict) -> dict:
+        """Prepare metadata for response"""
+        response_metadata = metadata.copy()
+        response_metadata["stored_nodes"] = json.loads(metadata["stored_nodes"])
+        response_metadata["size"] = int(metadata["size"])
+        return response_metadata
+
+    async def get_blob(self, file_name: str):
+        """Retrieve a blob by its file name"""
+        try:
+            # Get blob ID from filename
             blob_id = self._get_blob_id_by_file_name(file_name)
-            # Get metadata from Redis
+            if not blob_id:
+                raise HTTPException(status_code=404, detail="File not found")
 
-            metadata = self.redis.hgetall(f"blob:{blob_id}")
-            if not metadata:
-                logger.error(f"Blob not found: {blob_id}")
-                raise HTTPException(status_code=404, detail="Blob not found")
+            # Get and validate metadata
+            metadata = self._get_blob_metadata(blob_id)
 
-            # Get the nodes that have this blob
-            stored_nodes = json.loads(metadata.get("stored_nodes", "[]"))
-            if not stored_nodes:
-                logger.error(f"No nodes found for blob: {blob_id}")
-                raise HTTPException(
-                    status_code=404, detail="No nodes available with this blob"
-                )
+            # Get available node
+            node_id = self._get_available_node_for_blob(metadata)
 
-            # Try to get from first available node
-            node_id = stored_nodes[0]
-            logger.info(f"Retrieving blob {blob_id} from node {node_id}")
-
-            try:
-                async with httpx.AsyncClient() as client:
-                    response = await client.get(
-                        f"http://storage_node_{node_id}:8001/blob/{blob_id}",
-                        follow_redirects=True,
-                    )
-
-                    if response.status_code != 200:
-                        logger.error(
-                            f"Storage node {node_id} returned status {response.status_code}"
-                        )
-                        raise HTTPException(
-                            status_code=500,
-                            detail=f"Failed to retrieve blob from node {node_id}",
-                        )
-
-                    # Return the response with appropriate headers
-                    return StreamingResponse(
-                        content=response.iter_bytes(),
-                        media_type=metadata.get(
-                            "content_type", "application/octet-stream"
-                        ),
-                        headers={
-                            "Content-Disposition": f"attachment; filename={metadata.get('original_filename', 'download')}"
-                        },
-                    )
-
-            except httpx.RequestError as e:
-                logger.error(f"Request to storage node failed: {str(e)}")
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Failed to communicate with storage node: {str(e)}",
-                )
+            # Retrieve blob from node
+            return await self._retrieve_blob_from_node(blob_id, node_id, metadata)
 
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Error retrieving blob {blob_id}: {str(e)}", exc_info=True)
+            logger.error(f"Error retrieving blob: {str(e)}", exc_info=True)
             raise HTTPException(
                 status_code=500, detail=f"Failed to retrieve blob: {str(e)}"
+            )
+
+    def _get_blob_metadata(self, blob_id: str) -> dict:
+        """Get and validate blob metadata"""
+        metadata = self.redis.hgetall(f"blob:{blob_id}")
+        if not metadata:
+            logger.error(f"Blob not found: {blob_id}")
+            raise HTTPException(status_code=404, detail="Blob not found")
+        return metadata
+
+    def _get_available_node_for_blob(self, metadata: dict) -> str:
+        """Get an available node that has the blob"""
+        stored_nodes = json.loads(metadata.get("stored_nodes", "[]"))
+        if not stored_nodes:
+            logger.error("No nodes found for blob")
+            raise HTTPException(
+                status_code=404, detail="No nodes available with this blob"
+            )
+
+        # Get active nodes
+        active_nodes = self.get_active_nodes()
+
+        # Find first available node that has the blob
+        for node_id in stored_nodes:
+            if node_id in active_nodes:
+                return node_id
+
+        logger.error("No active nodes found with the blob")
+        raise HTTPException(
+            status_code=503, detail="No active nodes available with this blob"
+        )
+
+    async def _retrieve_blob_from_node(
+        self, blob_id: str, node_id: str, metadata: dict
+    ):
+        """Retrieve blob from specified node"""
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"http://storage_node_{node_id}:8001/blob/{blob_id}",
+                    follow_redirects=True,
+                )
+
+                if response.status_code != 200:
+                    logger.error(
+                        f"Storage node {node_id} returned status {response.status_code}"
+                    )
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to retrieve blob from node {node_id}",
+                    )
+
+                return StreamingResponse(
+                    content=response.iter_bytes(),
+                    media_type=metadata.get("content_type", "application/octet-stream"),
+                    headers={
+                        "Content-Disposition": f"attachment; filename={metadata.get('original_filename', 'download')}"
+                    },
+                )
+
+        except httpx.RequestError as e:
+            logger.error(f"Request to storage node failed: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to communicate with storage node: {str(e)}",
             )
 
     def get_active_nodes(self) -> List[str]:
