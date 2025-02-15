@@ -53,7 +53,7 @@ class Coordinator(ICoordinator):
         """Store a blob across all available storage nodes concurrently"""
         try:
             blob_id = str(uuid.uuid4())
-            logger.info(f"Processing upload for file: {file.filename}")
+            logger.info(f"Starting upload for {file.filename} (blob: {blob_id})")
 
             # Store filename mapping
             self._store_file_name(file.filename, blob_id)
@@ -67,6 +67,8 @@ class Coordinator(ICoordinator):
 
             # Read file content once
             content = await file.read()
+            content_size = len(content)
+            logger.info(f"Read {content_size} bytes from {file.filename}")
 
             # Initialize metadata with "in_progress" status
             initial_metadata = {
@@ -78,10 +80,11 @@ class Coordinator(ICoordinator):
                 "pending_nodes": active_nodes,
                 "failed_nodes": [],
                 "created_at": datetime.now().isoformat(),
-                "size": None,
+                "size": content_size,
                 "checksum": None,
             }
             self._store_metadata(blob_id, initial_metadata)
+            logger.info(f"Initialized metadata for blob {blob_id}: {initial_metadata}")
 
             # Create and gather upload tasks
             tasks = []
@@ -92,6 +95,7 @@ class Coordinator(ICoordinator):
                     )
                 )
                 tasks.append(task)
+            logger.info(f"Created upload tasks for nodes: {active_nodes}")
 
             # Wait for first successful upload
             first_success = None
@@ -141,6 +145,16 @@ class Coordinator(ICoordinator):
         """Handle remaining uploads in the background"""
         try:
             metadata = self._get_blob_metadata(blob_id)
+            if not metadata:
+                logger.error(f"No metadata found for blob {blob_id}")
+                return
+
+            logger.info(
+                f"Starting background uploads for blob {blob_id}. "
+                f"Current state: successful={metadata.get('successful_nodes', [])}, "
+                f"pending={metadata.get('pending_nodes', [])}"
+            )
+
             successful_nodes = set(metadata.get("successful_nodes", []))
             failed_nodes = set()
 
@@ -148,33 +162,52 @@ class Coordinator(ICoordinator):
             for task in remaining_tasks:
                 try:
                     result = await task
-                    successful_nodes.add(result["node_id"])
+                    node_id = result["node_id"]
+                    successful_nodes.add(node_id)
+                    logger.info(
+                        f"Background upload succeeded for node {node_id}. "
+                        f"Total successful: {len(successful_nodes)}"
+                    )
                 except Exception as e:
                     logger.error(f"Background upload failed: {str(e)}")
-                    # Extract node_id from error message
-                    error_msg = str(e)
-                    if "node_id=" in error_msg:
-                        failed_node = error_msg.split("node_id=")[1].split()[0]
+                    if "node_id=" in str(e):
+                        failed_node = str(e).split("node_id=")[1].split()[0]
                         failed_nodes.add(failed_node)
+                        logger.error(
+                            f"Upload failed for node {failed_node}. "
+                            f"Total failed: {len(failed_nodes)}"
+                        )
 
             # Update final metadata
             metadata["successful_nodes"] = list(successful_nodes)
             metadata["failed_nodes"] = list(failed_nodes)
             metadata["pending_nodes"] = []
-            metadata["upload_status"] = (
-                "completed" if len(failed_nodes) == 0 else "degraded"
-            )
+
+            if len(failed_nodes) == 0:
+                metadata["upload_status"] = "completed"
+                logger.info(
+                    f"Blob {blob_id} upload completed successfully. "
+                    f"Stored on nodes: {successful_nodes}"
+                )
+            else:
+                metadata["upload_status"] = "degraded"
+                logger.warning(
+                    f"Blob {blob_id} upload degraded. "
+                    f"Successful: {successful_nodes}, Failed: {failed_nodes}"
+                )
 
             self._store_metadata(blob_id, metadata)
+            logger.info(f"Updated final metadata for blob {blob_id}: {metadata}")
 
             # Check if we need to trigger auto-repair
-            if (
-                len(successful_nodes) < len(self.get_active_nodes()) * 0.5
-            ):  # Less than 50% success
+            if len(successful_nodes) < len(self.get_active_nodes()) * 0.5:
+                logger.warning(f"Triggering auto-repair for blob {blob_id}")
                 asyncio.create_task(self._trigger_auto_repair(blob_id))
 
         except Exception as e:
-            logger.error(f"Error handling remaining uploads: {str(e)}")
+            logger.error(
+                f"Error handling remaining uploads for blob {blob_id}: {str(e)}"
+            )
 
     async def _store_blob_on_node(
         self,
@@ -297,37 +330,38 @@ class Coordinator(ICoordinator):
     async def get_blob(self, file_name: str):
         """Retrieve a blob by its file name"""
         try:
-            # Get blob ID from filename
-            logger.info(f"Looking up blob ID for file: {file_name}")
             blob_id = self._get_blob_id_by_file_name(file_name)
             if not blob_id:
-                logger.error(f"No blob ID found for file: {file_name}")
+                logger.error(f"File not found: {file_name}")
                 raise HTTPException(status_code=404, detail="File not found")
-            logger.info(f"Found blob ID: {blob_id} for file: {file_name}")
 
-            # Get and validate metadata
-            logger.info(f"Retrieving metadata for blob: {blob_id}")
             metadata = self._get_blob_metadata(blob_id)
             if not metadata:
-                logger.error(f"No metadata found for blob: {blob_id}")
+                logger.error(f"Metadata not found for blob: {blob_id}")
                 raise HTTPException(status_code=404, detail="Blob metadata not found")
-            logger.info(f"Found metadata for blob {blob_id}: {metadata}")
 
-            # Get available node
-            logger.info(f"Finding available node for blob: {blob_id}")
+            status = metadata.get("upload_status", "unknown")
+            logger.info(
+                f"Retrieved metadata for {file_name} (blob: {blob_id}): "
+                f"size={metadata.get('size')}B, status={status}, "
+                f"nodes={metadata.get('successful_nodes', [])}"
+            )
+
+            if status == "in_progress":
+                logger.warning(
+                    f"Attempting to retrieve blob {blob_id} while upload is still in progress"
+                )
+            elif status == "degraded":
+                logger.warning(f"Retrieving blob {blob_id} in degraded state")
+
             node_id = self._get_available_node_for_blob(metadata)
-            logger.info(f"Selected node {node_id} for retrieval of blob: {blob_id}")
-
-            # Retrieve blob from node
             return await self._retrieve_blob_from_node(blob_id, node_id, metadata)
 
         except HTTPException:
             raise
         except Exception as e:
             logger.error(f"Error retrieving blob: {str(e)}", exc_info=True)
-            raise HTTPException(
-                status_code=500, detail=f"Failed to retrieve blob: {str(e)}"
-            )
+            raise HTTPException(status_code=500, detail=str(e))
 
     def _get_blob_metadata(self, blob_id: str) -> dict:
         """Get and parse blob metadata"""
@@ -358,23 +392,23 @@ class Coordinator(ICoordinator):
         """Get an available node that has the blob"""
         successful_nodes = metadata.get("successful_nodes", [])
         if not successful_nodes:
-            logger.error("No nodes found for blob in metadata")
+            logger.error("No nodes found with blob")
             raise HTTPException(
                 status_code=404, detail="No nodes available with this blob"
             )
-        logger.info(f"Found nodes with blob: {successful_nodes}")
 
         # Get active nodes
         active_nodes = self.get_active_nodes()
-        logger.info(f"Currently active nodes: {active_nodes}")
 
         # Find first available node that has the blob
         for node_id in successful_nodes:
             if node_id in active_nodes:
-                logger.info(f"Selected node {node_id} (active and has the blob)")
+                logger.info(
+                    f"Using node {node_id} for retrieval (active nodes: {active_nodes})"
+                )
                 return node_id
 
-        logger.error(f"No active nodes found among nodes with blob: {successful_nodes}")
+        logger.error(f"No active nodes among {successful_nodes}")
         raise HTTPException(
             status_code=503, detail="No active nodes available with this blob"
         )
@@ -384,111 +418,86 @@ class Coordinator(ICoordinator):
     ):
         """Retrieve blob from specified node"""
         try:
-            # Get node info including port
-            logger.info(f"Getting node info for node: {node_id}")
+            # Get node info and prepare request
             node_info = json.loads(self.redis.hget("storage_nodes", node_id))
             node_port = node_info.get("listen_port", 8001)
-            logger.info(f"Node {node_id} is listening on port: {node_port}")
+            url = f"http://storage_node_{node_id}:{node_port}/blob/{blob_id}"
+
+            logger.info(f"Retrieving blob from node {node_id} at port {node_port}")
 
             async with httpx.AsyncClient(timeout=30.0) as client:
-                service_name = f"storage_node_{node_id}"
-                url = f"http://{service_name}:{node_port}/blob/{blob_id}"
-                logger.info(f"Requesting blob from: {url}")
-
                 try:
-                    response = await client.get(
-                        url,
-                        follow_redirects=True,
-                    )
-                    logger.info(
-                        f"Response status from node {node_id}: {response.status_code}"
-                    )
+                    response = await client.get(url, follow_redirects=True)
 
                     if response.status_code != 200:
                         logger.error(
-                            f"Storage node {node_id} returned status {response.status_code}: {response.text}"
+                            f"Node {node_id} returned {response.status_code}: {response.text}"
                         )
                         raise HTTPException(
                             status_code=500,
-                            detail=f"Failed to retrieve blob from node {node_id}",
+                            detail=f"Failed to retrieve from node {node_id}",
                         )
 
-                    content_type = metadata.get(
-                        "content_type", "application/octet-stream"
-                    )
-                    filename = metadata.get("original_filename", "download")
-                    logger.info(
-                        f"Successfully retrieved blob {blob_id} from node {node_id}. "
-                        f"Content-Type: {content_type}, Filename: {filename}"
-                    )
-
+                    logger.info(f"Successfully retrieved blob from node {node_id}")
                     return StreamingResponse(
                         content=response.iter_bytes(),
-                        media_type=content_type,
+                        media_type=metadata.get(
+                            "content_type", "application/octet-stream"
+                        ),
                         headers={
-                            "Content-Disposition": f"attachment; filename={filename}"
+                            "Content-Disposition": f"attachment; filename={metadata.get('original_filename', 'download')}"
                         },
                     )
 
                 except httpx.RequestError as e:
-                    logger.error(
-                        f"Connection failed to node {node_id} at {url}: {str(e)}"
-                    )
+                    logger.error(f"Connection failed to node {node_id}: {str(e)}")
                     raise HTTPException(
                         status_code=500,
-                        detail=f"Failed to communicate with storage node: {str(e)}",
+                        detail=f"Failed to communicate with node {node_id}",
                     )
 
         except Exception as e:
             logger.error(f"Error retrieving from node {node_id}: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to retrieve from node {node_id}: {str(e)}",
-            )
+            raise HTTPException(status_code=500, detail=str(e))
 
     def get_active_nodes(self) -> List[str]:
         """Get list of active storage nodes"""
         try:
             active_nodes = []
             nodes = self.redis.hgetall("storage_nodes")
-            logger.info(f"Raw nodes data from Redis: {nodes}")
-
             current_time = datetime.now()
+
             for node_id, node_data in nodes.items():
                 try:
                     node = json.loads(node_data)
-                    logger.info(f"Processing node {node_id}: {node}")
-
                     last_heartbeat = datetime.fromisoformat(node["last_heartbeat"])
                     time_since_heartbeat = (
                         current_time - last_heartbeat
                     ).total_seconds()
 
-                    logger.info(f"Time since last heartbeat: {time_since_heartbeat}s")
-
-                    is_active = (
+                    if (
                         time_since_heartbeat < settings.NODE_TIMEOUT
                         and node.get("status") == "active"
-                    )
-
-                    if is_active:
+                    ):
                         active_nodes.append(node_id)
                     else:
-                        logger.info(
-                            f"Node {node_id} is inactive: timeout={time_since_heartbeat}s, status={node.get('status')}"
+                        logger.debug(
+                            f"Node {node_id} is inactive: "
+                            f"timeout={time_since_heartbeat:.1f}s, status={node.get('status')}"
                         )
 
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse node info for {node_id}: {e}")
-                except KeyError as e:
-                    logger.error(
-                        f"Missing required field in node info for {node_id}: {e}"
-                    )
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.error(f"Invalid node data for node {node_id}: {str(e)}")
 
-            logger.info(f"Found {len(active_nodes)} active nodes: {active_nodes}")
+            if not active_nodes:
+                logger.warning("No active storage nodes found")
+            else:
+                logger.debug(f"Active nodes: {active_nodes}")
+
             return active_nodes
+
         except Exception as e:
-            logger.error(f"Error getting active nodes: {e}")
+            logger.error(f"Error getting active nodes: {str(e)}")
             return []
 
     def _is_node_active(self, node: dict) -> bool:
