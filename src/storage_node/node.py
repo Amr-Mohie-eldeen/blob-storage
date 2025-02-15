@@ -72,7 +72,7 @@ class StorageNode:
                     await f.write(chunk)
 
             # Calculate checksum
-            checksum = await self._calculate_checksum(blob_path)
+            checksum = await calculate_checksum(str(blob_path))
 
             logger.info(
                 f"Successfully stored blob {blob_id}, size: {file_size}, checksum: {checksum}"
@@ -113,14 +113,6 @@ class StorageNode:
             raise HTTPException(
                 status_code=500, detail=f"Failed to store blob: {str(e)}"
             )
-
-    async def _calculate_checksum(self, blob_path: Path) -> str:
-        """Calculate the checksum of the blob file"""
-        sha256_hash = hashlib.sha256()
-        async with aiofiles.open(blob_path, "rb") as f:
-            while chunk := await f.read(8192):
-                sha256_hash.update(chunk)
-        return sha256_hash.hexdigest()
 
     async def start(self):
         """Start the storage node"""
@@ -192,8 +184,7 @@ class StorageNode:
                 raise BlobNotFoundError(f"Metadata not found for blob {blob_id}")
 
             # Verify file integrity
-            with open(blob_path, "rb") as f:
-                current_checksum = calculate_checksum(f)
+            current_checksum = await calculate_checksum(str(blob_path))
 
             if current_checksum != metadata.get("checksum"):
                 logger.error(f"Checksum mismatch for blob {blob_id}")

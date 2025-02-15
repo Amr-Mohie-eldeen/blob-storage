@@ -2,14 +2,15 @@
 import hashlib
 import os
 from typing import BinaryIO
+import aiofiles
 
 
-def calculate_checksum(file: BinaryIO) -> str:
-    """Calculate SHA-256 checksum of a file"""
+async def calculate_checksum(file_path: str) -> str:
+    """Calculate SHA-256 checksum of a file asynchronously"""
     sha256_hash = hashlib.sha256()
-    for byte_block in iter(lambda: file.read(4096), b""):
-        sha256_hash.update(byte_block)
-    file.seek(0)
+    async with aiofiles.open(file_path, "rb") as f:
+        while chunk := await f.read(8192):
+            sha256_hash.update(chunk)
     return sha256_hash.hexdigest()
 
 
