@@ -13,8 +13,8 @@ def check_service(service_type, port):
         else:
             print(f"{service_type} is not healthy")
             return 1
-    except:
-        print(f"Cannot connect to {service_type}")
+    except Exception as e:
+        print(f"Cannot connect to {service_type}: {e}")
         return 1
 
 
