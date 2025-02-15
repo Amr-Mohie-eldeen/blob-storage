@@ -46,9 +46,6 @@ refresh:
 	@make build-dev
 	@make up-dev
 
-logs:
-	@docker compose logs -f
-
 lint:
 	@ruff check .
 
