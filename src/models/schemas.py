@@ -10,6 +10,7 @@ class NodeInfo(BaseModel):
     available_space: int
     status: str
     last_heartbeat: datetime
+    listen_port: int
 
 
 class BlobMetadata(BaseModel):

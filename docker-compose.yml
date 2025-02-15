@@ -40,6 +40,7 @@ services:
       - REDIS_HOST=redis
       - BASE_STORAGE_PATH=/data
       - NODE_ID=1
+      - LISTEN_PORT=8001
     volumes:
       - storage_node_1_data:/data
     depends_on:
@@ -59,6 +60,7 @@ services:
       - REDIS_HOST=redis
       - BASE_STORAGE_PATH=/data
       - NODE_ID=2
+      - LISTEN_PORT=8002
     volumes:
       - storage_node_2_data:/data
     depends_on:

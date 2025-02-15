@@ -186,38 +186,26 @@ class Coordinator(ICoordinator):
     ) -> dict:
         """Store blob on a specific node"""
         try:
+            # Get node info including port
+            node_info = json.loads(self.redis.hget("storage_nodes", node_id))
+            node_port = node_info.get("listen_port", 8001)  # Get actual listening port
+
             async with httpx.AsyncClient(timeout=30.0) as client:
                 files = {"file": (filename, content, content_type)}
 
-                # Add retry logic
-                max_retries = 3
-                retry_delay = 1.0
+                response = await client.post(
+                    f"http://storage_node_{node_id}:{node_port}/blob/{blob_id}",
+                    files=files,
+                )
 
-                for attempt in range(max_retries):
-                    try:
-                        response = await client.post(
-                            f"http://storage_node_{node_id}:8001/blob/{blob_id}",
-                            files=files,
-                        )
+                if response.status_code == 200:
+                    result = response.json()
+                    result["node_id"] = node_id
+                    return result
 
-                        if response.status_code == 200:
-                            result = response.json()
-                            result["node_id"] = node_id
-                            return result
-
-                        logger.error(
-                            f"Storage node {node_id} failed with status {response.status_code}: {response.text}"
-                        )
-                    except Exception as e:
-                        logger.error(
-                            f"Attempt {attempt + 1} failed for node {node_id}: {str(e)}"
-                        )
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= 2  # Exponential backoff
-                        continue
-
-                raise Exception(f"All {max_retries} attempts failed for node {node_id}")
+                logger.error(
+                    f"Storage node {node_id} failed with status {response.status_code}: {response.text}"
+                )
 
         except Exception as e:
             logger.error(f"Failed to store blob on node {node_id}: {str(e)}")
@@ -310,17 +298,25 @@ class Coordinator(ICoordinator):
         """Retrieve a blob by its file name"""
         try:
             # Get blob ID from filename
+            logger.info(f"Looking up blob ID for file: {file_name}")
             blob_id = self._get_blob_id_by_file_name(file_name)
             if not blob_id:
+                logger.error(f"No blob ID found for file: {file_name}")
                 raise HTTPException(status_code=404, detail="File not found")
+            logger.info(f"Found blob ID: {blob_id} for file: {file_name}")
 
             # Get and validate metadata
+            logger.info(f"Retrieving metadata for blob: {blob_id}")
             metadata = self._get_blob_metadata(blob_id)
             if not metadata:
+                logger.error(f"No metadata found for blob: {blob_id}")
                 raise HTTPException(status_code=404, detail="Blob metadata not found")
+            logger.info(f"Found metadata for blob {blob_id}: {metadata}")
 
             # Get available node
+            logger.info(f"Finding available node for blob: {blob_id}")
             node_id = self._get_available_node_for_blob(metadata)
+            logger.info(f"Selected node {node_id} for retrieval of blob: {blob_id}")
 
             # Retrieve blob from node
             return await self._retrieve_blob_from_node(blob_id, node_id, metadata)
@@ -362,20 +358,23 @@ class Coordinator(ICoordinator):
         """Get an available node that has the blob"""
         successful_nodes = metadata.get("successful_nodes", [])
         if not successful_nodes:
-            logger.error("No nodes found for blob")
+            logger.error("No nodes found for blob in metadata")
             raise HTTPException(
                 status_code=404, detail="No nodes available with this blob"
             )
+        logger.info(f"Found nodes with blob: {successful_nodes}")
 
         # Get active nodes
         active_nodes = self.get_active_nodes()
+        logger.info(f"Currently active nodes: {active_nodes}")
 
         # Find first available node that has the blob
         for node_id in successful_nodes:
             if node_id in active_nodes:
+                logger.info(f"Selected node {node_id} (active and has the blob)")
                 return node_id
 
-        logger.error("No active nodes found with the blob")
+        logger.error(f"No active nodes found among nodes with blob: {successful_nodes}")
         raise HTTPException(
             status_code=503, detail="No active nodes available with this blob"
         )
@@ -385,34 +384,66 @@ class Coordinator(ICoordinator):
     ):
         """Retrieve blob from specified node"""
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    f"http://storage_node_{node_id}:8001/blob/{blob_id}",
-                    follow_redirects=True,
-                )
+            # Get node info including port
+            logger.info(f"Getting node info for node: {node_id}")
+            node_info = json.loads(self.redis.hget("storage_nodes", node_id))
+            node_port = node_info.get("listen_port", 8001)
+            logger.info(f"Node {node_id} is listening on port: {node_port}")
 
-                if response.status_code != 200:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                service_name = f"storage_node_{node_id}"
+                url = f"http://{service_name}:{node_port}/blob/{blob_id}"
+                logger.info(f"Requesting blob from: {url}")
+
+                try:
+                    response = await client.get(
+                        url,
+                        follow_redirects=True,
+                    )
+                    logger.info(
+                        f"Response status from node {node_id}: {response.status_code}"
+                    )
+
+                    if response.status_code != 200:
+                        logger.error(
+                            f"Storage node {node_id} returned status {response.status_code}: {response.text}"
+                        )
+                        raise HTTPException(
+                            status_code=500,
+                            detail=f"Failed to retrieve blob from node {node_id}",
+                        )
+
+                    content_type = metadata.get(
+                        "content_type", "application/octet-stream"
+                    )
+                    filename = metadata.get("original_filename", "download")
+                    logger.info(
+                        f"Successfully retrieved blob {blob_id} from node {node_id}. "
+                        f"Content-Type: {content_type}, Filename: {filename}"
+                    )
+
+                    return StreamingResponse(
+                        content=response.iter_bytes(),
+                        media_type=content_type,
+                        headers={
+                            "Content-Disposition": f"attachment; filename={filename}"
+                        },
+                    )
+
+                except httpx.RequestError as e:
                     logger.error(
-                        f"Storage node {node_id} returned status {response.status_code}"
+                        f"Connection failed to node {node_id} at {url}: {str(e)}"
                     )
                     raise HTTPException(
                         status_code=500,
-                        detail=f"Failed to retrieve blob from node {node_id}",
+                        detail=f"Failed to communicate with storage node: {str(e)}",
                     )
 
-                return StreamingResponse(
-                    content=response.iter_bytes(),
-                    media_type=metadata.get("content_type", "application/octet-stream"),
-                    headers={
-                        "Content-Disposition": f"attachment; filename={metadata.get('original_filename', 'download')}"
-                    },
-                )
-
-        except httpx.RequestError as e:
-            logger.error(f"Request to storage node failed: {str(e)}")
+        except Exception as e:
+            logger.error(f"Error retrieving from node {node_id}: {str(e)}")
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to communicate with storage node: {str(e)}",
+                detail=f"Failed to retrieve from node {node_id}: {str(e)}",
             )
 
     def get_active_nodes(self) -> List[str]:

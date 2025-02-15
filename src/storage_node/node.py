@@ -25,9 +25,9 @@ class StorageNode(IStorageNode):
     def __init__(self, node_id: str):
         self.node_id = node_id
         self.storage_dir = os.path.join(settings.BASE_STORAGE_PATH, f"node_{node_id}")
-        logger.info(
-            f"Initializing storage node {node_id} with directory: {self.storage_dir}"
-        )
+        # Get the actual port the node is listening on
+        self.listen_port = int(os.getenv("LISTEN_PORT", "8001"))
+        logger.info(f"Initializing storage node {node_id} with port {self.listen_port}")
 
         try:
             self.redis = Redis(
@@ -128,6 +128,7 @@ class StorageNode(IStorageNode):
                 available_space=get_available_space(self.storage_dir),
                 status="active",
                 last_heartbeat=datetime.now(),
+                listen_port=self.listen_port,
             )
 
             # Convert to JSON and log
@@ -170,9 +171,10 @@ class StorageNode(IStorageNode):
                 available_space=get_available_space(self.storage_dir),
                 status="active",
                 last_heartbeat=datetime.now(),
+                listen_port=self.listen_port,
             )
             self.redis.hset("storage_nodes", self.node_id, node_info.json())
-            logger.info(f"Heartbeat updated for node {self.node_id}")
+            logger.debug(f"Heartbeat updated for node {self.node_id}")
         except Exception as e:
             logger.error(f"Failed to update heartbeat: {str(e)}", exc_info=True)
             raise

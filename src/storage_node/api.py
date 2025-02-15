@@ -27,6 +27,8 @@ async def startup_event():
 
         logger.info(f"Initializing storage node {node_id}")
         storage_node = StorageNode(node_id)
+        # Configure uvicorn to use the correct port
+        app.port = storage_node.listen_port
         await storage_node.start()
         logger.info(f"Storage node {node_id} initialized successfully")
     except Exception as e:
