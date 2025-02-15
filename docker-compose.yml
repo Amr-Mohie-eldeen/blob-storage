@@ -1,5 +1,5 @@
 # docker-compose.yml
-version: '3.8'
+version: "3.8"
 
 services:
   redis:
@@ -47,6 +47,25 @@ services:
       - coordinator
     networks:
       - blob_network
+  storage_node_2:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.storage_node
+      args:
+        NODE_ID: 2
+    ports:
+      - "8002:8002"
+    environment:
+      - REDIS_HOST=redis
+      - BASE_STORAGE_PATH=/data
+      - NODE_ID=2
+    volumes:
+      - storage_node_2_data:/data
+    depends_on:
+      - redis
+      - coordinator
+    networks:
+      - blob_network
 
 networks:
   blob_network:
@@ -56,3 +75,4 @@ volumes:
   redis_data:
   coordinator_data:
   storage_node_1_data:
+  storage_node_2_data:

@@ -38,3 +38,14 @@ async def get_blob(
         return await coordinator.get_blob(file_name)
     except Exception as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/nodes")
+async def get_active_nodes(coordinator: ICoordinator = Depends(get_coordinator)):
+    """Get information about active storage nodes"""
+    try:
+        active_nodes = coordinator.get_active_nodes()
+        return {"active_nodes_count": len(active_nodes), "active_nodes": active_nodes}
+    except Exception as e:
+        logger.error(f"Failed to get active nodes: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

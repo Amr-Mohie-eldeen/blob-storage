@@ -189,7 +189,7 @@ class StorageNode(IStorageNode):
                 last_heartbeat=datetime.now(),
             )
             self.redis.hset("storage_nodes", self.node_id, node_info.json())
-            logger.debug(f"Heartbeat updated for node {self.node_id}")
+            logger.info(f"Heartbeat updated for node {self.node_id}")
         except Exception as e:
             logger.error(f"Failed to update heartbeat: {str(e)}", exc_info=True)
             raise
