@@ -1,17 +1,6 @@
 # Distributed Blob Storage System
 
-The Distributed Blob Storage System is a scalable and fault-tolerant solution for storing and retrieving large binary objects (blobs) across multiple storage nodes.
-
-This system is designed to provide efficient and reliable storage for applications that need to handle large amounts of unstructured data. It consists of a coordinator service that manages the distribution of blobs across multiple storage nodes, ensuring data availability and fault tolerance.
-
-Key features of the Distributed Blob Storage System include:
-
-- Scalable architecture with support for multiple storage nodes
-- Efficient blob storage and retrieval
-- Fault tolerance through data replication (planned feature)
-- RESTful API for easy integration with other applications
-- Redis-based metadata storage for quick access to blob information
-- Docker-based deployment for easy setup and scaling
+A simple implementation of blob storage an attempt to learn about systems engineering
 
 ## Repository Structure
 
