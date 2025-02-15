@@ -2,26 +2,26 @@
 import os
 import asyncio
 import logging
-import shutil
 from datetime import datetime
 from fastapi import UploadFile, HTTPException
 from redis import Redis
 from pathlib import Path
-from typing import BinaryIO
+from typing import Dict, Any
 from fastapi.responses import FileResponse
-from ..common.config import settings
-from ..common.utils import calculate_checksum, get_available_space
-from ..models.schemas import NodeInfo, BlobMetadata
-from ..common.exceptions import BlobNotFoundError
+from src.common.config import settings
+from src.common.utils import calculate_checksum, get_available_space
+from src.models.schemas import NodeInfo, BlobMetadata
+from src.common.exceptions import BlobNotFoundError
 import aiofiles
-import hashlib
+from src.common.interfaces import IStorageNode
+from src.common.redis_metadata_store import RedisMetadataStore
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class StorageNode:
+class StorageNode(IStorageNode):
     def __init__(self, node_id: str):
         self.node_id = node_id
         self.storage_dir = os.path.join(settings.BASE_STORAGE_PATH, f"node_{node_id}")
@@ -49,7 +49,7 @@ class StorageNode:
             logger.error(f"Failed to create storage directory: {str(e)}")
             raise
 
-    # src/storage_node/node.py
+        self.metadata_store = RedisMetadataStore(self.redis)
 
     async def store_blob(self, blob_id: str, file: UploadFile) -> dict:
         """Store a blob file"""
@@ -128,6 +128,17 @@ class StorageNode:
     def register_node(self):
         """Register this node with the coordinator"""
         try:
+            # Log Redis connection details
+            logger.info(
+                f"Attempting to connect to Redis at {self.redis.connection_pool.connection_kwargs}"
+            )
+
+            # Test Redis connection
+            if not self.redis.ping():
+                raise Exception("Could not ping Redis server")
+
+            logger.info("Successfully connected to Redis")
+
             node_info = NodeInfo(
                 node_id=self.node_id,
                 storage_dir=self.storage_dir,
@@ -135,7 +146,24 @@ class StorageNode:
                 status="active",
                 last_heartbeat=datetime.now(),
             )
-            self.redis.hset("storage_nodes", self.node_id, node_info.json())
+
+            # Convert to JSON and log
+            node_json = node_info.json()
+            logger.info(f"Registering node with info: {node_json}")
+
+            # Attempt to set in Redis
+            result = self.redis.hset("storage_nodes", self.node_id, node_json)
+            logger.info(f"Redis hset result: {result}")
+
+            # Verify registration
+            stored_data = self.redis.hget("storage_nodes", self.node_id)
+            if stored_data:
+                logger.info(f"Successfully verified node registration: {stored_data}")
+            else:
+                raise Exception(
+                    "Node registration verification failed - no data stored"
+                )
+
             logger.info(f"Node {self.node_id} registered successfully")
         except Exception as e:
             logger.error(f"Failed to register node: {str(e)}", exc_info=True)
@@ -207,3 +235,22 @@ class StorageNode:
             raise HTTPException(
                 status_code=500, detail=f"Failed to retrieve blob: {str(e)}"
             )
+
+    async def delete_blob(self, blob_id: str) -> bool:
+        try:
+            file_path = Path(self.storage_dir) / blob_id
+            if file_path.exists():
+                file_path.unlink()
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Failed to delete blob {blob_id}: {str(e)}")
+            return False
+
+    def get_node_status(self) -> Dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "storage_dir": self.storage_dir,
+            "available_space": get_available_space(self.storage_dir),
+            "status": "active",
+        }

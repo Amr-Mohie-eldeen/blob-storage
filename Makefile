@@ -41,6 +41,6 @@ clean:
 status:
 	@docker compose ps
 refresh:
-	@make down
+	@make down -v
 	@make build-dev
 	@make up-dev

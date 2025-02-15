@@ -1,29 +1,21 @@
 # src/coordinator/coordinator.py
 from fastapi import UploadFile, HTTPException
-import hashlib
 import uuid
 from datetime import datetime
 import json
 from redis import Redis
-from ..common.config import settings
+from src.common.config import settings
 import logging
 import httpx
-from fastapi import UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
-import hashlib
-import uuid
-from datetime import datetime
-import json
-from redis import Redis
-from ..common.config import settings
-import logging
-import httpx
-from io import BytesIO
+from src.common.interfaces import ICoordinator
+from src.common.redis_metadata_store import RedisMetadataStore
+from typing import List
 
 logger = logging.getLogger(__name__)
 
 
-class Coordinator:
+class Coordinator(ICoordinator):
     def __init__(self):
         try:
             self.redis = Redis(
@@ -31,23 +23,24 @@ class Coordinator:
                 port=settings.REDIS_PORT,
                 decode_responses=True,
             )
+            self.metadata_store = RedisMetadataStore(self.redis)
             # Test Redis connection
             self.redis.ping()
         except Exception as e:
             logger.error(f"Redis connection failed: {str(e)}")
             raise Exception(f"Failed to initialize Redis: {str(e)}")
 
-    def _store_file_name(self, file_name: str, blob_id: str):
+    def _store_file_name(self, filename: str, blob_id: str):
         """Store the file name associated with a blob ID"""
         try:
-            self.redis.set(file_name, blob_id)
+            self.redis.hset("filename_to_blob", filename, blob_id)
         except Exception as e:
             logger.error(f"Failed to store file name: {e}")
 
     def _get_blob_id_by_file_name(self, file_name: str) -> str:
         """Retrieve the blob ID associated with a file name"""
         try:
-            blob_id = self.redis.get(file_name)
+            blob_id = self.redis.hget("filename_to_blob", file_name)
             return blob_id
         except Exception as e:
             logger.error(f"Failed to retrieve blob ID by file name: {e}")
@@ -58,12 +51,11 @@ class Coordinator:
         Store a blob across storage nodes
         """
         try:
-            # Generate unique blob ID
             blob_id = str(uuid.uuid4())
 
             logger.info(f"Processing upload for file: {file.filename}")
             self._store_file_name(file.filename, blob_id)
-            # Get active nodes
+
             active_nodes = self.get_active_nodes()
             if not active_nodes:
                 logger.error("No active storage nodes available")
@@ -148,8 +140,6 @@ class Coordinator:
             logger.error(f"Upload failed: {str(e)}", exc_info=True)
             raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
 
-    # src/coordinator/coordinator.py
-
     async def get_blob(self, file_name: str):
         """
         Retrieve a blob by its ID
@@ -217,25 +207,47 @@ class Coordinator:
                 status_code=500, detail=f"Failed to retrieve blob: {str(e)}"
             )
 
-    def get_active_nodes(self) -> list:
+    def get_active_nodes(self) -> List[str]:
         """Get list of active storage nodes"""
         try:
-            nodes = []
-            node_data = self.redis.hgetall("storage_nodes")
-            logger.info(f"Found {len(node_data)} storage nodes")
+            active_nodes = []
+            nodes = self.redis.hgetall("storage_nodes")
+            logger.info(f"Raw nodes data from Redis: {nodes}")
 
-            for node_info in node_data.values():
+            current_time = datetime.now()
+            for node_id, node_data in nodes.items():
                 try:
-                    node = json.loads(node_info)
-                    if self._is_node_active(node):
-                        nodes.append(node["node_id"])
-                except json.JSONDecodeError as e:
-                    logger.error(f"Failed to parse node info: {e}")
-                except KeyError as e:
-                    logger.error(f"Missing required field in node info: {e}")
+                    node = json.loads(node_data)
+                    logger.info(f"Processing node {node_id}: {node}")
 
-            logger.info(f"Found {len(nodes)} active nodes")
-            return nodes
+                    last_heartbeat = datetime.fromisoformat(node["last_heartbeat"])
+                    time_since_heartbeat = (
+                        current_time - last_heartbeat
+                    ).total_seconds()
+
+                    logger.info(f"Time since last heartbeat: {time_since_heartbeat}s")
+
+                    is_active = (
+                        time_since_heartbeat < settings.NODE_TIMEOUT
+                        and node.get("status") == "active"
+                    )
+
+                    if is_active:
+                        active_nodes.append(node_id)
+                    else:
+                        logger.info(
+                            f"Node {node_id} is inactive: timeout={time_since_heartbeat}s, status={node.get('status')}"
+                        )
+
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse node info for {node_id}: {e}")
+                except KeyError as e:
+                    logger.error(
+                        f"Missing required field in node info for {node_id}: {e}"
+                    )
+
+            logger.info(f"Found {len(active_nodes)} active nodes: {active_nodes}")
+            return active_nodes
         except Exception as e:
             logger.error(f"Error getting active nodes: {e}")
             return []
@@ -264,3 +276,27 @@ class Coordinator:
         except (KeyError, ValueError) as e:
             logger.error(f"Error checking node status: {e}")
             return False
+
+    def register_node(self):
+        """Register this node with the coordinator"""
+        try:
+            node_info = NodeInfo(
+                node_id=self.node_id,
+                storage_dir=self.storage_dir,
+                available_space=get_available_space(self.storage_dir),
+                status="active",
+                last_heartbeat=datetime.now(),
+            )
+            # Add debug logging
+            logger.info(f"Attempting to register node with info: {node_info.dict()}")
+            logger.info(f"Redis connection status: {self.redis.ping()}")
+
+            self.redis.hset("storage_nodes", self.node_id, node_info.json())
+            logger.info(f"Node {self.node_id} registered successfully")
+
+            # Verify registration
+            stored_info = self.redis.hget("storage_nodes", self.node_id)
+            logger.info(f"Stored node info: {stored_info}")
+        except Exception as e:
+            logger.error(f"Failed to register node: {str(e)}", exc_info=True)
+            raise

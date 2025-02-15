@@ -1,18 +1,26 @@
 # src/coordinator/api.py
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from .coordinator import Coordinator
+from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
+from src.coordinator.coordinator import Coordinator
 import logging
+from src.common.interfaces import ICoordinator
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
-coordinator = Coordinator()
+coordinator: ICoordinator = Coordinator()
+
+
+def get_coordinator() -> ICoordinator:
+    """FastAPI dependency to get coordinator instance"""
+    return coordinator
 
 
 @app.post("/upload")  # Remove the trailing slash
-async def upload_file(file: UploadFile = File(...)):
+async def upload_file(
+    file: UploadFile = File(...), coordinator: ICoordinator = Depends(get_coordinator)
+):
     """Upload a file to the distributed storage"""
     try:
         result = await coordinator.store_blob(file)
@@ -23,7 +31,9 @@ async def upload_file(file: UploadFile = File(...)):
 
 
 @app.get("/blob/{file_name}")
-async def get_blob(file_name: str):
+async def get_blob(
+    file_name: str, coordinator: ICoordinator = Depends(get_coordinator)
+):
     try:
         return await coordinator.get_blob(file_name)
     except Exception as e:

@@ -1,7 +1,6 @@
 # src/common/utils.py
 import hashlib
 import os
-from typing import BinaryIO
 import aiofiles
 
 
