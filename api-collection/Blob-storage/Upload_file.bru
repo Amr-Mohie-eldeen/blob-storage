@@ -5,11 +5,11 @@ meta {
 }
 
 post {
-  url: http://localhost:8000/upload/
+  url: {{URL}}/upload/
   body: multipartForm
   auth: none
 }
 
 body:multipart-form {
-  file: @file(/Users/amrmohie/Downloads/costs.csv)
+  file: @file(/Users/amrmohie/Downloads/SA.txt)
 }

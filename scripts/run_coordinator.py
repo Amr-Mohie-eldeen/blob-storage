@@ -1,5 +1,6 @@
 # scripts/run_coordinator.py
 import uvicorn
+
 from src.coordinator.api import app
 
 if __name__ == "__main__":

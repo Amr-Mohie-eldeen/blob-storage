@@ -1,12 +1,14 @@
 # src/storage_node/api.py
-from fastapi import FastAPI, UploadFile, File, HTTPException, Depends
-from src.storage_node.node import StorageNode
-from src.models.schemas import UploadResponse
-from src.common.exceptions import BlobNotFoundError
-from src.common.interfaces import IStorageNode
+import logging
 import os
 from typing import AsyncGenerator
-import logging
+
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+
+from src.common.exceptions import BlobNotFoundError
+from src.common.interfaces import IStorageNode
+from src.models.schemas import UploadResponse
+from src.storage_node.node import StorageNode
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,8 @@ async def startup_event():
 
         logger.info(f"Initializing storage node {node_id}")
         storage_node = StorageNode(node_id)
+        # Configure uvicorn to use the correct port
+        app.port = storage_node.listen_port
         await storage_node.start()
         logger.info(f"Storage node {node_id} initialized successfully")
     except Exception as e:
