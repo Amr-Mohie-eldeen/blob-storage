@@ -1,10 +1,7 @@
 # src/coordinator/coordinator.py
-import asyncio
-import json
 import logging
-import uuid
-from datetime import datetime
-from typing import List, Dict
+from time import gmtime
+from typing import List
 
 from fastapi import HTTPException, UploadFile
 from redis import Redis
@@ -12,12 +9,11 @@ from redis import Redis
 from src.common.config import settings
 from src.common.interfaces import ICoordinator
 
+from .blob_storage import BlobStorage
 from .metadata_manager import MetadataManager
 from .node_manager import NodeManager
-from .blob_storage import BlobStorage
 from .repair_manager import RepairManager
 from .upload_manager import UploadManager
-from time import gmtime
 
 # https://stackoverflow.com/a/7517430/49489
 logging.basicConfig(

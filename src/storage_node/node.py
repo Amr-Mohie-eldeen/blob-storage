@@ -61,7 +61,7 @@ class StorageNode(IStorageNode):
             if settings.NODE_DELAY > 0:
                 logger.info(f"Delaying for {settings.NODE_DELAY} seconds")
                 await asyncio.sleep(settings.NODE_DELAY)
-                logger.info(f"Delaying is over")
+                logger.info("Delaying is over")
             blob_path = Path(self.storage_dir) / blob_id
             file_size = 0
 

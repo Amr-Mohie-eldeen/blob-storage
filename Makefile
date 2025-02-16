@@ -47,7 +47,8 @@ refresh:
 	@make up-dev
 
 lint:
-	@ruff check .
+	@black .
+	@ruff check . --fix
 
 format:
 	@black .

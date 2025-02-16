@@ -2,13 +2,13 @@ import asyncio
 import logging
 import uuid
 from datetime import datetime
-from typing import List, Dict
+from typing import Dict, List
 
 from fastapi import HTTPException, UploadFile
 
+from .blob_storage import BlobStorage
 from .metadata_manager import MetadataManager
 from .node_manager import NodeManager
-from .blob_storage import BlobStorage
 from .repair_manager import RepairManager
 
 logger = logging.getLogger(__name__)
@@ -177,9 +177,9 @@ class UploadManager:
         successful_nodes = set()
         failed_nodes = set()
 
-        for task in tasks:
+        for completed_task in asyncio.as_completed(tasks):
             try:
-                result = await task
+                result = await completed_task
                 node_id = result["node_id"]
                 successful_nodes.add(node_id)
                 logger.info(
