@@ -91,6 +91,7 @@ class StorageNode(IStorageNode):
                 "checksum": checksum,
                 "node_id": self.node_id,
                 "status": "success",
+                "stored_nodes": [self.node_id],
             }
 
         except Exception as e:
