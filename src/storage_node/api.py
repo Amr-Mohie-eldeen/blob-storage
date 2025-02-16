@@ -2,6 +2,7 @@
 import logging
 import os
 from typing import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 
@@ -12,15 +13,10 @@ from src.storage_node.node import StorageNode
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI()
 
-# Create a global storage node instance
-storage_node = None
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize the storage node on startup"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan context manager for FastAPI app"""
     global storage_node
     try:
         node_id = os.getenv("NODE_ID")
@@ -29,13 +25,19 @@ async def startup_event():
 
         logger.info(f"Initializing storage node {node_id}")
         storage_node = StorageNode(node_id)
-        # Configure uvicorn to use the correct port
         app.port = storage_node.listen_port
         await storage_node.start()
         logger.info(f"Storage node {node_id} initialized successfully")
-    except Exception as e:
-        logger.error(f"Failed to initialize storage node: {e}")
-        raise
+        yield
+    finally:
+        # Cleanup code here if needed
+        pass
+
+
+app = FastAPI(lifespan=lifespan)
+
+# Create a global storage node instance
+storage_node = None
 
 
 async def get_storage_node() -> AsyncGenerator[IStorageNode, None]:
