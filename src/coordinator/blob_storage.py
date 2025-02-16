@@ -1,6 +1,5 @@
 import json
 import logging
-from typing import Dict
 
 import httpx
 from fastapi import HTTPException

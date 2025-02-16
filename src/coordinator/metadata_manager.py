@@ -1,6 +1,7 @@
 import json
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional
+
 from fastapi import HTTPException
 from redis import Redis
 

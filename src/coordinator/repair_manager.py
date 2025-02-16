@@ -1,9 +1,9 @@
 import logging
 from typing import List
 
+from .blob_storage import BlobStorage
 from .metadata_manager import MetadataManager
 from .node_manager import NodeManager
-from .blob_storage import BlobStorage
 
 logger = logging.getLogger(__name__)
 
