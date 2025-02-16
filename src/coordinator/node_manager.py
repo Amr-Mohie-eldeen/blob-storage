@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime
-from typing import List, Optional, Dict
+from typing import Dict, List, Optional
 
 from fastapi import HTTPException
 from redis import Redis
