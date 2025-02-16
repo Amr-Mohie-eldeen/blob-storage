@@ -66,6 +66,7 @@ services:
       - ./config:/app/config:ro
     environment:
       - DEBUG=1
+      - NODE_DELAY=29
     command:
       [
         "python",

@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     NODE_TIMEOUT: int = int(os.getenv("NODE_TIMEOUT", "30"))
     BASE_STORAGE_PATH: str = os.getenv("BASE_STORAGE_PATH", "data")
     DEBUG: bool = os.getenv("DEBUG", "0") == "1"
+    NODE_DELAY: int = int(os.getenv("NODE_DELAY", "0"))
 
     NODE_TIMEOUT: int = 30
 
